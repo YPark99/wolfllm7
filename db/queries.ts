@@ -1,4 +1,4 @@
-// queries.ts v1.3
+// queries.ts v1.1
 "server-only";
 
 import { genSaltSync, hashSync } from "bcrypt-ts";
@@ -41,16 +41,12 @@ export async function saveChat({
   id,
   messages,
   userId,
-  threadId,
 }: {
   id: string;
   messages: any;
   userId: string;
-  threadId: string;
 }) {
   try {
-    console.log("Saving chat with threadId:", threadId);
-
     const selectedChats = await db.select().from(chat).where(eq(chat.id, id));
 
     if (selectedChats.length > 0) {
@@ -58,7 +54,6 @@ export async function saveChat({
         .update(chat)
         .set({
           messages: JSON.stringify(messages),
-          threadId, // Обновляем threadId
         })
         .where(eq(chat.id, id));
     }
@@ -68,18 +63,12 @@ export async function saveChat({
       createdAt: new Date(),
       messages: JSON.stringify(messages),
       userId,
-      threadId, // Сохраняем threadId
     });
   } catch (error) {
-    console.error(
-      error instanceof Error
-        ? `PostgresError: ${error.message}`
-        : 'Unknown error while saving chat'
-    );
+    console.error("Failed to save chat in database:", error);
     throw error;
   }
 }
-
 
 export async function deleteChatById({ id }: { id: string }) {
   try {

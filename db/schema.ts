@@ -28,8 +28,10 @@ export const chat = pgTable('Chat', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
   createdAt: timestamp('createdAt').notNull(),
   messages: json('messages').notNull(),
-  userId: uuid('userId').notNull().references(() => user.id),
-  threadId: text('threadId').notNull(), // Изменено с uuid на text
+  userId: uuid('userId')
+    .notNull()
+    .references(() => user.id),
+    threadId: uuid('threadId').notNull().default('00000000-0000-0000-0000-000000000000'),
 });
 
 export type Chat = Omit<InferSelectModel<typeof chat>, 'messages'> & {

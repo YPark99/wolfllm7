@@ -1,12 +1,13 @@
+// app/(chat)/chat/page.tsx v1
 import { CoreMessage } from 'ai';
 import { cookies } from 'next/headers';
 import { notFound } from 'next/navigation';
 
 import { DEFAULT_MODEL_NAME, models } from '@/ai/models';
 import { auth } from '@/app/(auth)/auth';
-import { Chat as PreviewChat } from '@/components/custom/chat';
+import ChatComponent from '@/components/custom/chat'; // default импорт
 import { getChatById } from '@/db/queries';
-import { Chat } from '@/db/schema';
+import { Chat as ChatSchema } from '@/db/schema';
 import { convertToUIMessages } from '@/lib/utils';
 
 export default async function Page(props: { params: Promise<any> }) {
@@ -18,8 +19,7 @@ export default async function Page(props: { params: Promise<any> }) {
     notFound();
   }
 
-  // type casting
-  const chat: Chat = {
+  const chat: ChatSchema = {
     ...chatFromDb,
     messages: convertToUIMessages(chatFromDb.messages as Array<CoreMessage>),
   };
@@ -41,7 +41,7 @@ export default async function Page(props: { params: Promise<any> }) {
     DEFAULT_MODEL_NAME;
 
   return (
-    <PreviewChat
+    <ChatComponent
       id={chat.id}
       initialMessages={chat.messages}
       selectedModelId={selectedModelId}

@@ -1,3 +1,4 @@
+// app/(chat)/chat/page.tsx v01
 import { CoreMessage } from 'ai';
 import { cookies } from 'next/headers';
 import { notFound } from 'next/navigation';

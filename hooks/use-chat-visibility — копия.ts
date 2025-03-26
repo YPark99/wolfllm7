@@ -1,36 +1,10 @@
-// hooks/use-chat-visibility.ts v1.1
 'use client';
 
+import { updateChatVisibility } from '@/app/(chat)/actions';
+import { VisibilityType } from '@/components/visibility-selector';
+import { Chat } from '@/lib/db/schema';
 import { useMemo } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
-
-// Если updateChatVisibility не экспортируется из '@/app/(chat)/actions',
-// определяем его здесь как заглушку. При необходимости замените на реальную реализацию.
-async function updateChatVisibility({
-  chatId,
-  visibility,
-}: {
-  chatId: string;
-  visibility: VisibilityType;
-}) {
-  // Пример вызова API для обновления видимости чата.
-  return fetch('/api/chat/visibility', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chatId, visibility }),
-  });
-}
-
-// Определяем тип видимости локально.
-export type VisibilityType = 'public' | 'private';
-
-// Импортируем схему чата из базы данных. Путь обновлён на "@/db/schema".
-import { Chat } from '@/db/schema';
-
-// Расширяем тип Chat, добавляя свойство visibility.
-type ExtendedChat = Chat & {
-  visibility: VisibilityType;
-};
 
 export function useChatVisibility({
   chatId,
@@ -40,7 +14,7 @@ export function useChatVisibility({
   initialVisibility: VisibilityType;
 }) {
   const { mutate, cache } = useSWRConfig();
-  const history: Array<ExtendedChat> = cache.get('/api/history')?.data;
+  const history: Array<Chat> = cache.get('/api/history')?.data;
 
   const { data: localVisibility, mutate: setLocalVisibility } = useSWR(
     `${chatId}-visibility`,
@@ -60,7 +34,7 @@ export function useChatVisibility({
   const setVisibilityType = (updatedVisibilityType: VisibilityType) => {
     setLocalVisibility(updatedVisibilityType);
 
-    mutate<ExtendedChat[]>(
+    mutate<Array<Chat>>(
       '/api/history',
       (history) => {
         return history
@@ -79,7 +53,7 @@ export function useChatVisibility({
     );
 
     updateChatVisibility({
-      chatId,
+      chatId: chatId,
       visibility: updatedVisibilityType,
     });
   };

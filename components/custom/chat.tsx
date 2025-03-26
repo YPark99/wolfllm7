@@ -1,39 +1,69 @@
-// components/custom/chat.tsx v1.3
+// components/custom/chat.tsx v1.5.14
 'use client';
 
-import { Attachment, Message } from 'ai';
-import { AnimatePresence } from 'framer-motion';
-import { useState, useRef, useEffect } from 'react';
-import { useWindowSize } from 'usehooks-ts';
-import { toast } from 'sonner';
+import { useAssistant, Message, CreateMessage } from 'ai/react';
+import { useEffect, useState } from 'react';
 
+// Импорт UI-компонентов
 import { ChatHeader } from '@/components/custom/chat-header';
+import { MultimodalInput } from '@/components/custom/multimodal-input';
 import { Message as PreviewMessage } from '@/components/custom/message';
 import { useScrollToBottom } from '@/components/custom/use-scroll-to-bottom';
+import { Canvas, UICanvas } from '@/components/custom/canvas';
+import { CanvasStreamHandler } from '@/components/custom/canvas-stream-handler';
 
-import { Canvas, UICanvas } from './canvas';
-import { CanvasStreamHandler } from './canvas-stream-handler';
-import { MultimodalInput } from './multimodal-input';
-import { Overview } from './overview';
-
-export function Chat({
-  id,
-  initialMessages,
-  selectedModelId,
-}: {
+interface ChatProps {
   id: string;
-  initialMessages: Array<Message>;
+  initialMessages: Message[];
   selectedModelId: string;
-}) {
-  const { width: windowWidth, height: windowHeight } = useWindowSize();
-  const [messages, setMessages] = useState<Array<Message>>(initialMessages);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [streamingData, setStreamingData] = useState<any>(null);
-  const [attachments, setAttachments] = useState<Array<Attachment>>([]);
-  const [error, setError] = useState<string | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
+}
 
+const Chat = ({ id, initialMessages, selectedModelId }: ChatProps) => {
+  const {
+    status,
+    messages,
+    input,
+    submitMessage,
+    handleInputChange,
+    error,
+    append,
+    stop,
+    setMessages,
+    // Нет свойства data в useAssistant, поэтому убираем destructuring 'data'.
+  } = useAssistant({ api: '/api/assistant' });
+
+  // Если требуется передавать стриминговые данные в CanvasStreamHandler,
+  // временно зададим переменную streamingData = undefined.
+  // Если в будущем понадобятся настоящие данные стрима, нужно взять их из другого источника.
+  const streamingData = undefined;
+
+  // Используем наш хук для автопрокрутки
+  const [messagesContainerRef, messagesEndRef] = useScrollToBottom<HTMLDivElement>();
+
+  // Обёртка для изменения ввода
+  const onSetInput = (value: string) => {
+    handleInputChange({ target: { value } } as React.ChangeEvent<HTMLInputElement>);
+  };
+
+  // Функция отправки формы
+  const onSubmit = (event?: { preventDefault?: () => void }): void => {
+    if (event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+    if (input.trim()) {
+      submitMessage();
+    }
+  };
+
+  // Обёртка для append
+  const onAppend = async (
+    message: Message | CreateMessage
+  ): Promise<string | null | undefined> => {
+    await append(message);
+    return undefined;
+  };
+
+  // Состояние для Canvas
   const [canvas, setCanvas] = useState<UICanvas>({
     documentId: 'init',
     content: '',
@@ -41,156 +71,85 @@ export function Chat({
     status: 'idle',
     isVisible: false,
     boundingBox: {
-      top: (windowHeight ?? 1080) / 4,
-      left: (windowWidth ?? 1920) / 4,
+      top: 200,
+      left: 400,
       width: 250,
       height: 50,
     },
   });
 
-  const [messagesContainerRef, messagesEndRef] =
-    useScrollToBottom<HTMLDivElement>();
+  // Состояние для вложений
+  const [attachments, setAttachments] = useState<Array<any>>([]);
 
-  /** Функция для обработки SSE-потока */
-  const handleStream = async () => {
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      const response = await fetch(`/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id,
-          modelId: selectedModelId,
-          messages,
-        }),
-      });
-
-      if (!response.ok || !response.body) {
-        throw new Error(`Ошибка запроса: ${response.status}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-
-          try {
-            const jsonData = JSON.parse(line.slice(6));
-            console.log('SSE Data:', jsonData);
-
-            if (jsonData.status === 'start') {
-              setStreamingData(jsonData);
-            } else if (jsonData.status === 'end') {
-              setIsLoading(false);
-            } else if (jsonData.message) {
-              setMessages((prev) => [...prev, jsonData.message]);
-            }
-          } catch (error) {
-            console.error('Ошибка парсинга SSE:', error);
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Ошибка загрузки потока:', err);
-      setError('Ошибка загрузки потока');
-      toast.error('Произошла ошибка при получении данных.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  // Автопрокрутка сообщений
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, messagesEndRef]);
 
   return (
-    <>
-      <div className="flex flex-col min-w-0 h-dvh bg-background">
-        <ChatHeader selectedModelId={selectedModelId} />
-        <div
-          ref={messagesContainerRef}
-          className="flex flex-col min-w-0 gap-6 flex-1 overflow-y-scroll"
-        >
-          {messages.length === 0 && <Overview />}
+    <div className="flex flex-col min-h-screen">
+      <ChatHeader selectedModelId={selectedModelId} />
 
-          {messages.map((message) => (
-            <PreviewMessage
-              key={message.id}
-              role={message.role}
-              content={message.content}
-              attachments={message.experimental_attachments}
-              toolInvocations={message.toolInvocations}
-              canvas={canvas}
-              setCanvas={setCanvas}
-            />
-          ))}
-
-          <div
-            ref={messagesEndRef}
-            className="shrink-0 min-w-[24px] min-h-[24px]"
-          />
-        </div>
-
-        <form
-          className="flex mx-auto px-4 bg-background pb-4 md:pb-6 gap-2 w-full md:max-w-3xl"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!input.trim()) return;
-            setMessages((prev) => [...prev, { id: Date.now().toString(), role: 'user', content: input }]);
-            setInput('');
-            handleStream();
-          }}
-        >
-          <MultimodalInput
-            input={input}
-            setInput={setInput}
-            handleSubmit={() => handleStream()}
-            isLoading={isLoading}
-            stop={() => eventSourceRef.current?.close()}
-            attachments={attachments}
-            setAttachments={setAttachments}
-            messages={messages}
-            setMessages={setMessages}
-            append={async (msg) => {
-              setMessages((prev) => [...prev, { ...msg, id: msg.id || Date.now().toString() }]);
-              return Promise.resolve(msg.id || null);
-            }}
-          />
-        </form>
-      </div>
-
-      <AnimatePresence>
-        {canvas && canvas.isVisible && (
-          <Canvas
-            input={input}
-            setInput={setInput}
-            handleSubmit={() => handleStream()}
-            isLoading={isLoading}
-            stop={() => eventSourceRef.current?.close()}
-            attachments={attachments}
-            setAttachments={setAttachments}
-            append={async (msg) => {
-              setMessages((prev) => [...prev, { ...msg, id: msg.id || Date.now().toString() }]);
-              return Promise.resolve(msg.id || null);
-            }}
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4">
+        {messages.map((msg) => (
+          <PreviewMessage
+            key={msg.id}
+            role={msg.role}
+            content={msg.content}
+            attachments={msg.experimental_attachments}
+            toolInvocations={msg.toolInvocations}
             canvas={canvas}
             setCanvas={setCanvas}
-            messages={messages}
-            setMessages={setMessages}
           />
-        )}
-      </AnimatePresence>
+        ))}
+        <div ref={messagesEndRef} />
+      </div>
 
-      <CanvasStreamHandler streamingData={streamingData} setCanvas={setCanvas} />
-    </>
+      {error && <div className="text-red-500 p-2">Ошибка: {error.message}</div>}
+
+      <form onSubmit={(e) => onSubmit(e)} className="p-4 flex gap-2">
+        <MultimodalInput
+          input={input}
+          setInput={onSetInput}
+          attachments={attachments}
+          setAttachments={setAttachments}
+          isLoading={status === 'in_progress'}
+          stop={stop}
+          messages={messages}
+          setMessages={setMessages}
+          append={onAppend}
+          handleSubmit={onSubmit}
+        />
+        <button type="submit" disabled={status === 'in_progress'}>
+          Отправить
+        </button>
+      </form>
+
+      {/* Компонент Canvas */}
+      {canvas.isVisible && (
+        <Canvas
+          input={input}
+          setInput={onSetInput}
+          handleSubmit={onSubmit}
+          isLoading={status === 'in_progress'}
+          stop={stop}
+          attachments={attachments}
+          setAttachments={setAttachments}
+          append={onAppend}
+          canvas={canvas}
+          setCanvas={setCanvas}
+          messages={messages}
+          setMessages={setMessages}
+        />
+      )}
+
+      {/* Передаём streamingData={undefined} */}
+      <CanvasStreamHandler
+        streamingData={streamingData}
+        setCanvas={setCanvas}
+      />
+    </div>
   );
-}
+};
+
+export default Chat;

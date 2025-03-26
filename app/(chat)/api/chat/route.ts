@@ -1,152 +1,151 @@
-// app(chat)/api/chat/route.ts v1.6.0
+// app(chat)/api/chat/route.ts v1.3.1
+import { AssistantResponse } from 'ai';
 import OpenAI from 'openai';
+import { convertToCoreMessages, Message } from 'ai';
+import { z } from 'zod';
+import { customModel } from '@/ai';
+import { models } from '@/ai/models';
+import { canvasPrompt, regularPrompt } from '@/ai/prompts';
 import { auth } from '@/app/(auth)/auth';
-import { saveChat, getChatsByUserId } from '@/db/queries';
+import {
+  saveChat,
+  getChatById,
+  deleteChatById,
+} from '@/db/queries';
+import { generateUUID } from '@/lib/utils';
+import {
+  countTokensInMessage,
+  countTokensInResponse,
+} from '@/lib/tokenCounter';
+import { db } from '@/db/queries';
+import { tokenRecords } from '@/db/schema';
+import { eq, desc } from 'drizzle-orm';
 
+// Инициализируем клиента OpenAI с использованием API-ключа из окружения
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || '',
 });
 
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-}
+export async function POST(request: Request) {
+  // Ожидаем, что тело запроса содержит: { id, messages, modelId, threadId? }
+  const { id, messages, modelId, threadId } = await request.json() as {
+    id: string;
+    messages: Message[];
+    modelId: string;
+    threadId?: string | null;
+  };
 
-export async function submitMessage({
-  threadId,
-  userId,
-  content,
-}: {
-  threadId?: string;
-  userId: string;
-  content: string;
-}) {
-  let newThreadId = threadId;
+  // Проверка аутентификации
+  const session = await auth();
+  if (!session?.user?.id) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  const userId = session.user.id;
 
-  if (!newThreadId) {
-    const thread = await openai.beta.threads.create();
-    newThreadId = thread.id;
+  // Определяем модель
+  const model = models.find((m) => m.id === modelId);
+  if (!model) {
+    return new Response('Model not found', { status: 404 });
   }
 
-  if (!newThreadId) {
-    throw new Error('Thread ID is undefined');
+  // Берём последнее сообщение пользователя
+  const latestMessage = messages[messages.length - 1];
+  if (!latestMessage || typeof latestMessage.content !== 'string') {
+    return new Response('No valid message content provided', { status: 400 });
   }
 
-  // **Добавляем запуск ассистента (run)**
-  const run = await openai.beta.threads.runs.create(newThreadId, {
-    assistant_id: process.env.ASSISTANT_ID!,
+  // Подсчитываем токены для последнего сообщения
+  const userTokenCount = await countTokensInMessage(latestMessage.content, model);
+
+  // Проверяем баланс пользователя
+  const [balanceRecord] = await db
+    .select({ tokensBalance: tokenRecords.tokensBalance })
+    .from(tokenRecords)
+    .where(eq(tokenRecords.userId, userId))
+    .orderBy(desc(tokenRecords.createdAt))
+    .limit(1);
+  const userBalance = balanceRecord?.tokensBalance ?? 0;
+  if (userBalance < userTokenCount) {
+    return new Response(JSON.stringify({ status: 'insufficient_tokens' }), {
+      status: 403,
+    });
+  }
+
+  // Если threadId не передан, создаём новый поток через OpenAI
+  const computedThreadId =
+    threadId ?? (await openai.beta.threads.create({})).id;
+  console.log('Generated threadId:', computedThreadId);
+
+  // Создаём сообщение пользователя в потоке
+  const createdMessage = await openai.beta.threads.messages.create(
+    computedThreadId,
+    {
+      role: 'user',
+      content: latestMessage.content,
+    }
+  );
+
+  // Логирование информации о созданном сообщении
+  console.log('Created message in thread:', {
+    threadId: computedThreadId,
+    messageId: createdMessage.id,
+    content: latestMessage.content,
   });
 
-  // **Ждем завершения работы ассистента**
-  let runStatus = run.status;
-  while (runStatus !== "completed") {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const updatedRun = await openai.beta.threads.runs.retrieve(newThreadId, run.id);
-    runStatus = updatedRun.status;
-  }
+  // Возвращаем стриминговый ответ через AssistantResponse
+  return AssistantResponse(
+    { threadId: computedThreadId, messageId: createdMessage.id },
+    async ({ forwardStream }) => {
+      try {
+        // Запускаем стриминг ответа ассистента через OpenAI beta threads API
+        const runStream = openai.beta.threads.runs.stream(computedThreadId, {
+          assistant_id:
+            process.env.ASSISTANT_ID ??
+            (() => {
+              throw new Error('ASSISTANT_ID environment is not set');
+            })(),
+        });
 
-  // **Получаем окончательный список сообщений**
-  const response = await openai.beta.threads.messages.list(newThreadId);
-  const messages: Message[] = response.data.map((message) => ({
-    id: message.id,
-    role: message.role as 'user' | 'assistant',
-    content: extractTextFromMessageContent(message.content),
-  }));
+        console.log('Started streaming response from OpenAI for thread:', computedThreadId);
 
-  try {
-    console.log("Saving chat with threadId:", newThreadId);
-    await saveChat({
-      id: newThreadId,
-      messages,
-      userId,
-      threadId: newThreadId,
-    });
-  } catch (error) {
-    console.error(`PostgresError while saving chat: ${error instanceof Error ? error.message : error}`);
-  }
-
-  return { threadId: newThreadId, messages };
-}
-
-function extractTextFromMessageContent(content: any[]): string {
-  if (!Array.isArray(content)) {
-    return "Error: Invalid content format";
-  }
-
-  return content
-    .map((block) => {
-      if ('text' in block) {
-        return block.text.value;
-      } else if ('image_url' in block) {
-        return `[Image: ${block.image_url}]`;
-      }
-      return 'Unknown content type';
-    })
-    .join('\n');
-}
-
-export async function POST(request: Request) {
-  try {
-    const { id, messages, modelId }: { id: string; messages: any[]; modelId: string } =
-      await request.json();
-
-    const session = await auth();
-    if (!session?.user?.id) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
-    }
-
-    const userId = session.user.id;
-
-    const userChats = await getChatsByUserId({ id: userId });
-    const threadId = userChats.length > 0 ? userChats[0].threadId : undefined;
-
-    const latestMessage = messages[messages.length - 1];
-    if (!latestMessage || typeof latestMessage.content !== 'string') {
-      return new Response(JSON.stringify({ error: "No valid message content provided" }), {
-        status: 400,
-      });
-    }
-
-    const { messages: responseMessages, threadId: newThreadId } = await submitMessage({
-      threadId,
-      userId,
-      content: latestMessage.content,
-    });
-
-    // **Используем потоковую передачу с правильным SSE-форматом**
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        const send = async (data: any) => {
-          const formattedData = `data: ${JSON.stringify(data)}\n\n`;
-          controller.enqueue(encoder.encode(formattedData));
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        };
-
-        await send({ status: "start" });
-
-        for (const message of responseMessages) {
-          await send({ message });
+        // Логируем данные, поступающие в поток
+        for await (const chunk of runStream) {
+          console.log('Stream chunk received:', chunk);
         }
 
-        await send({ threadId: newThreadId, status: "end" });
-
-        controller.close();
+        await forwardStream(runStream);
+      } catch (error) {
+        console.error('Error while streaming response:', error);
       }
-    });
+    }
+  );
+}
 
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Transfer-Encoding': 'chunked',
-      },
-    });
+export async function DELETE(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get('id');
 
+  if (!id) {
+    return new Response('Not Found', { status: 404 });
+  }
+
+  const session = await auth();
+
+  if (!session?.user) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  try {
+    const chat = await getChatById({ id });
+    if (chat.userId !== session.user.id) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    await deleteChatById({ id });
+    return new Response('Chat deleted', { status: 200 });
   } catch (error) {
-    console.error("Server Error:", error);
-    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
+    return new Response('An error occurred while processing your request', {
+      status: 500,
+    });
   }
 }
